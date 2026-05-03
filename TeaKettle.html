@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tea Kettle Match Game</title>
+<style>
+  body {
+    font-family: sans-serif;
+    background: #1a1a1a;
+    color: white;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+  }
+
+  h1 { margin-bottom: 10px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 100px);
+    grid-gap: 12px;
+  }
+
+  .tile {
+    width: 100px;
+    height: 100px;
+    border-radius: 20px;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 40px;
+    transition: transform 0.3s, background 0.3s;
+  }
+
+  .hidden {
+    background: radial-gradient(circle, rgba(255,255,255,0.9), rgba(200,200,200,0.1));
+    filter: blur(1px);
+  }
+
+  .revealed {
+    background: #444;
+  }
+
+  .matched {
+    background: #d97706;
+  }
+
+  .tile:hover {
+    transform: scale(1.05);
+  }
+</style>
+</head>
+<body>
+
+<h1>🫖 Tea Kettle Match 🫖</h1>
+<div class="grid" id="grid"></div>
+
+<script>
+const grid = document.getElementById("grid");
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+let activeDrones = [];
+
+// 8 kettle "materials"
+const sounds = Array.from({length: 8}, (_, i) => ({
+  baseFreq: 700 + i * 80,
+  vibratoSpeed: 3 + i * 0.4,
+  vibratoDepth: 10 + i * 3,
+  brightness: 0.3 + i * 0.08   // timbre variation
+}));
+
+let tilesData = [...sounds, ...sounds]
+  .map((s, i) => ({...s, id: i}))
+  .sort(() => Math.random() - 0.5);
+
+let firstTile = null;
+let secondTile = null;
+let lock = false;
+
+// --- SOUND ENGINE ---
+
+function playKettleSound(data) {
+  const now = audioCtx.currentTime;
+
+  // --- BOILING BUILDUP (noise) ---
+  const bufferSize = audioCtx.sampleRate;
+  const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const dataArr = noiseBuffer.getChannelData(0);
+
+  for (let i = 0; i < bufferSize; i++) {
+    dataArr[i] = Math.random() * 2 - 1;
+  }
+
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = noiseBuffer;
+
+  const noiseFilter = audioCtx.createBiquadFilter();
+  noiseFilter.type = "lowpass";
+  noiseFilter.frequency.setValueAtTime(400, now);
+  noiseFilter.frequency.linearRampToValueAtTime(2000, now + 0.5);
+
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.001, now);
+  noiseGain.gain.linearRampToValueAtTime(0.15, now + 0.3);
+  noiseGain.gain.linearRampToValueAtTime(0.001, now + 0.6);
+
+  noise.connect(noiseFilter);
+  noiseFilter.connect(noiseGain);
+  noiseGain.connect(audioCtx.destination);
+
+  noise.start(now);
+  noise.stop(now + 0.6);
+
+  // --- WHISTLE ---
+  const osc = audioCtx.createOscillator();
+  osc.type = "sine";
+
+  const harmonic = audioCtx.createOscillator();
+  harmonic.type = "triangle";
+
+  osc.frequency.setValueAtTime(data.baseFreq - 200, now);
+  osc.frequency.linearRampToValueAtTime(data.baseFreq, now + 0.4);
+
+  harmonic.frequency.value = data.baseFreq * 2;
+
+  // Timbre shaping
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.frequency.value = data.baseFreq;
+  filter.Q.value = 5 + data.brightness * 10;
+
+  // Vibrato
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.frequency.value = data.vibratoSpeed;
+  lfoGain.gain.value = data.vibratoDepth;
+
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc.frequency);
+
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.0001, now + 0.4);
+  gain.gain.exponentialRampToValueAtTime(0.4, now + 0.6);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
+
+  osc.connect(filter);
+  harmonic.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.start(now);
+  harmonic.start(now);
+  lfo.start(now);
+
+  osc.stop(now + 1.2);
+  harmonic.stop(now + 1.2);
+  lfo.stop(now + 1.2);
+}
+
+// Persistent soft whistle after match
+function startDrone(data) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+
+  osc.type = "sine";
+  osc.frequency.value = data.baseFreq;
+
+  gain.gain.value = 0.03; // soft background
+
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.start();
+
+  activeDrones.push(osc);
+}
+
+// --- GAME LOGIC ---
+
+function createTile(data, index) {
+  const tile = document.createElement("div");
+  tile.classList.add("tile", "hidden");
+
+  tile.addEventListener("click", () => {
+    if (lock || tile.classList.contains("matched") || tile === firstTile) return;
+
+    reveal(tile, data);
+
+    if (!firstTile) {
+      firstTile = tile;
+      firstTile.data = data;
+    } else {
+      secondTile = tile;
+      secondTile.data = data;
+      lock = true;
+
+      if (firstTile.data.baseFreq === secondTile.data.baseFreq) {
+        setTimeout(() => {
+          firstTile.classList.add("matched");
+          secondTile.classList.add("matched");
+
+          firstTile.textContent = "🫖";
+          secondTile.textContent = "🫖";
+
+          startDrone(data);
+
+          resetTurn();
+        }, 400);
+      } else {
+        setTimeout(() => {
+          hide(firstTile);
+          hide(secondTile);
+          resetTurn();
+        }, 1000);
+      }
+    }
+  });
+
+  return tile;
+}
+
+function reveal(tile, data) {
+  tile.classList.remove("hidden");
+  tile.classList.add("revealed");
+  tile.textContent = "💨";
+  playKettleSound(data);
+}
+
+function hide(tile) {
+  tile.classList.add("hidden");
+  tile.classList.remove("revealed");
+  tile.textContent = "";
+}
+
+function resetTurn() {
+  firstTile = null;
+  secondTile = null;
+  lock = false;
+}
+
+// --- INIT ---
+tilesData.forEach((data, i) => {
+  grid.appendChild(createTile(data, i));
+});
+</script>
+
+</body>
+</html>
